@@ -345,10 +345,6 @@ local function grid_lane_level(lane_index)
   return lane_index == ui.selected_lane and 15 or 5
 end
 
-local function grid_bar_level(lane_index)
-  return lane_index == ui.selected_lane and 15 or 7
-end
-
 local function redraw_grid()
   if grid_device == nil then
     return
@@ -367,11 +363,33 @@ local function redraw_grid()
       grid_device:led(1, row, select_level)
 
       local value = lane and lane.current_value or 0
-      local bar_length = util.clamp(math.floor((value / 127) * 14 + 0.5), 0, 14)
-      local bar_level = grid_bar_level(lane_index)
-      for col = 2, 15 do
-        if (col - 1) <= bar_length then
-          grid_device:led(col, row, bar_level)
+      -- Blend neighboring columns for smoother perceived motion as values change.
+      local position = ((value / 127) * 14) + 1
+      local left_col = util.clamp(math.floor(position), 1, 15)
+      local right_col = util.clamp(left_col + 1, 1, 15)
+      local frac = util.clamp(position - left_col, 0, 1)
+
+      if right_col == left_col then
+        grid_device:led(left_col, row, select_level)
+      else
+        -- Sharper than linear crossfade: nearest column stays dominant longer.
+        local sharpness = 2.2
+        local left_weight = math.pow(1 - frac, sharpness)
+        local right_weight = math.pow(frac, sharpness)
+        local weight_total = left_weight + right_weight
+        local left_level = 0
+        local right_level = 0
+
+        if weight_total > 0 then
+          left_level = util.clamp(math.floor(((left_weight / weight_total) * select_level) + 0.5), 0, 15)
+          right_level = util.clamp(math.floor(((right_weight / weight_total) * select_level) + 0.5), 0, 15)
+        end
+
+        if left_level > 0 then
+          grid_device:led(left_col, row, left_level)
+        end
+        if right_level > 0 then
+          grid_device:led(right_col, row, right_level)
         end
       end
     end
