@@ -6,6 +6,7 @@ local STATE_FILE = DATA_DIR .. "state.data"
 local PAGE_GLOBAL = 1
 local PAGE_ROUTE = 2
 local PAGE_LFO = 3
+local STATE_VERSION = 2
 
 local LANE_COUNT = 16
 local MIN_RATE_HZ = 0.01
@@ -197,6 +198,7 @@ local function load_state()
   if util.file_exists(STATE_FILE) then
     local saved = tab.load(STATE_FILE)
     if saved ~= nil then
+      local needs_depth_reset = (saved.version == nil) or (saved.version < STATE_VERSION)
       ui.output_device = util.clamp(saved.output_device or ui.output_device, 1, 16)
       ui.selected_lane = util.clamp(saved.selected_lane or ui.selected_lane, 1, LANE_COUNT)
       if saved.lanes ~= nil then
@@ -211,7 +213,11 @@ local function load_state()
             lane.base = util.clamp(src.base or lane.base, 0, 127)
             lane.shape_index = util.clamp(src.shape_index or lane.shape_index, 1, #SHAPES)
             lane.rate = util.clamp(src.rate or lane.rate, MIN_RATE_HZ, MAX_RATE_HZ)
-            lane.depth = util.clamp(src.depth or lane.depth, 0, 127)
+            if needs_depth_reset then
+              lane.depth = 0
+            else
+              lane.depth = util.clamp(src.depth or lane.depth, 0, 127)
+            end
             lane.phase = src.phase or lane.phase
             lane.sh_value = src.sh_value or lane.sh_value
           end
@@ -242,6 +248,7 @@ local function save_state()
   end
 
   tab.save({
+      version = STATE_VERSION,
     output_device = ui.output_device,
     selected_lane = ui.selected_lane,
     lanes = saved_lanes,
