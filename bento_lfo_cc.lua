@@ -102,7 +102,7 @@ local function default_lane()
     parameter_index = 1,
     base = 64,
     shape_index = 1,
-    rate = 0.5,
+    rate = 0.1,
     depth = 0,
     phase = 0,
     sh_value = 0,
