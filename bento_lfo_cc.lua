@@ -8,7 +8,9 @@ local PAGE_ROUTE = 2
 local PAGE_LFO = 3
 local STATE_VERSION = 2
 
-local LANE_COUNT = 16
+local LANE_COUNT = 32
+local GRID_BANK_COUNT = 4
+local GRID_BANK_ROWS = 8
 local MIN_RATE_HZ = 0.001
 local MAX_RATE_HZ = 20.0
 
@@ -29,6 +31,7 @@ local ui = {
     [PAGE_LFO] = 1,
   },
   selected_lane = 1,
+  grid_bank = 1,
   output_device = 1,
   dirty = true,
 }
@@ -79,6 +82,48 @@ local function default_lane()
     last_sent_channel = nil,
     current_value = 64,
   }
+end
+
+local function lane_bank(index)
+  return math.floor(((index or 1) - 1) / GRID_BANK_ROWS) + 1
+end
+
+local function clamp_grid_bank(bank)
+  return util.clamp(bank or 1, 1, GRID_BANK_COUNT)
+end
+
+local function set_selected_lane(index, follow_grid_bank)
+  local lane_index = util.clamp(index or 1, 1, LANE_COUNT)
+  ui.selected_lane = lane_index
+  if follow_grid_bank ~= false then
+    ui.grid_bank = clamp_grid_bank(lane_bank(lane_index))
+  end
+end
+
+local function set_grid_bank(bank)
+  ui.grid_bank = clamp_grid_bank(bank)
+end
+
+local function native_grid_connected()
+  if grid == nil or grid.vports == nil then
+    return false
+  end
+
+  local port = grid.vports[1]
+  if port == nil or port.name == nil then
+    return false
+  end
+
+  local name = string.lower(tostring(port.name))
+  return name ~= "" and name ~= "none"
+end
+
+local function connect_grid_device()
+  if native_grid_connected() then
+    return grid.connect()
+  end
+
+  return nil
 end
 
 local function available_instrument_count()
@@ -201,6 +246,7 @@ local function load_state()
       local needs_depth_reset = (saved.version == nil) or (saved.version < STATE_VERSION)
       ui.output_device = util.clamp(saved.output_device or ui.output_device, 1, 16)
       ui.selected_lane = util.clamp(saved.selected_lane or ui.selected_lane, 1, LANE_COUNT)
+      ui.grid_bank = clamp_grid_bank(saved.grid_bank or lane_bank(ui.selected_lane))
       if saved.lanes ~= nil then
         for i = 1, LANE_COUNT do
           local lane = lanes[i]
@@ -251,12 +297,60 @@ local function save_state()
       version = STATE_VERSION,
     output_device = ui.output_device,
     selected_lane = ui.selected_lane,
+    grid_bank = ui.grid_bank,
     lanes = saved_lanes,
   }, STATE_FILE)
 end
 
 local function rate_step(rate)
   return 0.001
+end
+
+local function grid_lane_level(lane_index)
+  return lane_index == ui.selected_lane and 15 or 5
+end
+
+local function grid_bar_level(lane_index)
+  return lane_index == ui.selected_lane and 15 or 7
+end
+
+local function redraw_grid()
+  if grid_device == nil then
+    return
+  end
+
+  grid_device:all(0)
+
+  local page_start = ((ui.grid_bank - 1) * GRID_BANK_ROWS) + 1
+  local page_stop = math.min(page_start + GRID_BANK_ROWS - 1, LANE_COUNT)
+
+  for row = 1, GRID_BANK_ROWS do
+    local lane_index = page_start + row - 1
+    if lane_index <= page_stop then
+      local lane = lanes[lane_index]
+      local select_level = grid_lane_level(lane_index)
+      grid_device:led(1, row, select_level)
+
+      local value = lane and lane.current_value or 0
+      local bar_length = util.clamp(math.floor((value / 127) * 14 + 0.5), 0, 14)
+      local bar_level = grid_bar_level(lane_index)
+      for col = 2, 15 do
+        if (col - 1) <= bar_length then
+          grid_device:led(col, row, bar_level)
+        end
+      end
+    end
+  end
+
+  local page_col = grid_device.cols or 16
+  if page_col > 16 then
+    page_col = 16
+  end
+  for bank = 1, GRID_BANK_COUNT do
+    grid_device:led(page_col, bank, bank == ui.grid_bank and 8 or 2)
+  end
+
+  grid_device:refresh()
 end
 
 local function adjust_global(delta)
@@ -267,7 +361,7 @@ local function adjust_global(delta)
   if ui.selection[PAGE_GLOBAL] == 1 then
     set_output_device(ui.output_device + delta)
   elseif ui.selection[PAGE_GLOBAL] == 2 then
-    ui.selected_lane = util.clamp(ui.selected_lane + delta, 1, LANE_COUNT)
+    set_selected_lane(ui.selected_lane + delta)
   end
 end
 
@@ -518,6 +612,7 @@ function redraw()
 
   screen.update()
   ui.dirty = false
+  redraw_grid()
 end
 
 function enc(n, d)
@@ -558,10 +653,10 @@ function key(n, z)
   end
 
   if n == 2 then
-    ui.selected_lane = util.clamp(ui.selected_lane - 1, 1, LANE_COUNT)
+    set_selected_lane(ui.selected_lane - 1)
     mark_dirty()
   elseif n == 3 then
-    ui.selected_lane = util.clamp(ui.selected_lane + 1, 1, LANE_COUNT)
+    set_selected_lane(ui.selected_lane + 1)
     mark_dirty()
   end
 end
@@ -581,7 +676,37 @@ function init()
     reset_lane_history(lanes[i])
   end
 
+  set_selected_lane(ui.selected_lane, false)
+
   set_output_device(ui.output_device)
+
+  grid_device = connect_grid_device()
+  if grid_device ~= nil then
+    grid_device.key = function(x, y, z)
+      local page_col = grid_device.cols or 16
+      if page_col > 16 then
+        page_col = 16
+      end
+
+      if x == page_col then
+        if z == 1 and y >= 1 and y <= GRID_BANK_COUNT then
+          set_grid_bank(y)
+          mark_dirty()
+        end
+        return
+      end
+
+      if x == 1 and z == 1 then
+        local row = (y >= 1 and y <= GRID_BANK_ROWS) and y or 1
+        local lane_index = ((ui.grid_bank - 1) * GRID_BANK_ROWS) + row
+        if lane_index <= LANE_COUNT then
+          set_selected_lane(lane_index)
+          ui.page = PAGE_GLOBAL
+          mark_dirty()
+        end
+      end
+    end
+  end
 
   start_redraw_timer()
   run_lfos()
@@ -592,4 +717,10 @@ function cleanup()
   save_state()
   stop_lfos()
   stop_redraw_timer()
+  if grid_device ~= nil then
+    grid_device:all(0)
+    grid_device:refresh()
+    grid_device.key = nil
+    grid_device = nil
+  end
 end
