@@ -11,6 +11,9 @@ local STATE_VERSION = 2
 local LANE_COUNT = 32
 local GRID_BANK_COUNT = 4
 local GRID_BANK_ROWS = 8
+local GRID_VALUE_COL_MIN = 2
+local GRID_VALUE_COL_MAX = 15
+local GRID_HOLD_SECONDS = 3.0
 local MIN_RATE_HZ = 0.001
 local MAX_RATE_HZ = 20.0
 
@@ -44,6 +47,17 @@ local lfo_running = false
 local midigrid_lib
 local midigrid_2pages_lib
 local using_midigrid = false
+local grid_hold = {
+  active = false,
+  lane_index = nil,
+  row = nil,
+  base_col = nil,
+  base_value = nil,
+  started_at = 0,
+  highest_col = nil,
+  value_col_min = GRID_VALUE_COL_MIN,
+  value_col_max = GRID_VALUE_COL_MAX,
+}
 
 local function mark_dirty()
   ui.dirty = true
@@ -345,6 +359,60 @@ local function grid_lane_level(lane_index)
   return lane_index == ui.selected_lane and 15 or 5
 end
 
+local function grid_col_to_value(col, value_col_min, value_col_max)
+  local span = math.max(1, value_col_max - value_col_min)
+  local normalized = util.clamp((col - value_col_min) / span, 0, 1)
+  return util.clamp(math.floor((normalized * 127) + 0.5), 0, 127)
+end
+
+local function clear_grid_hold()
+  grid_hold.active = false
+  grid_hold.lane_index = nil
+  grid_hold.row = nil
+  grid_hold.base_col = nil
+  grid_hold.base_value = nil
+  grid_hold.started_at = 0
+  grid_hold.highest_col = nil
+  grid_hold.value_col_min = GRID_VALUE_COL_MIN
+  grid_hold.value_col_max = GRID_VALUE_COL_MAX
+end
+
+local function start_grid_hold(lane_index, row, col, value_col_min, value_col_max)
+  grid_hold.active = true
+  grid_hold.lane_index = lane_index
+  grid_hold.row = row
+  grid_hold.base_col = col
+  grid_hold.base_value = grid_col_to_value(col, value_col_min, value_col_max)
+  grid_hold.started_at = util.time()
+  grid_hold.highest_col = nil
+  grid_hold.value_col_min = value_col_min
+  grid_hold.value_col_max = value_col_max
+end
+
+local function maybe_commit_grid_hold()
+  if not grid_hold.active or grid_hold.lane_index == nil then
+    return
+  end
+
+  local held_for = util.time() - (grid_hold.started_at or 0)
+  if held_for < GRID_HOLD_SECONDS then
+    clear_grid_hold()
+    return
+  end
+
+  local lane = lanes[grid_hold.lane_index]
+  if lane ~= nil and grid_hold.base_value ~= nil then
+    lane.base = util.clamp(grid_hold.base_value, 0, 127)
+    if grid_hold.highest_col ~= nil then
+      local highest_value = grid_col_to_value(grid_hold.highest_col, grid_hold.value_col_min, grid_hold.value_col_max)
+      lane.depth = util.clamp(math.abs(highest_value - lane.base), 0, 127)
+    end
+  end
+
+  clear_grid_hold()
+  mark_dirty()
+end
+
 local function redraw_grid()
   if grid_device == nil then
     return
@@ -354,6 +422,12 @@ local function redraw_grid()
 
   local page_start = ((ui.grid_bank - 1) * GRID_BANK_ROWS) + 1
   local page_stop = math.min(page_start + GRID_BANK_ROWS - 1, LANE_COUNT)
+  local page_col = grid_device.cols or 16
+  if page_col > 16 then
+    page_col = 16
+  end
+  local value_col_min = GRID_VALUE_COL_MIN
+  local value_col_max = math.min(GRID_VALUE_COL_MAX, page_col - 1)
 
   for row = 1, GRID_BANK_ROWS do
     local lane_index = page_start + row - 1
@@ -362,43 +436,42 @@ local function redraw_grid()
       local select_level = grid_lane_level(lane_index)
       grid_device:led(1, row, select_level)
 
-      local value = lane and lane.current_value or 0
-      -- Blend neighboring columns for smoother perceived motion as values change.
-      local position = ((value / 127) * 14) + 1
-      local left_col = util.clamp(math.floor(position), 1, 15)
-      local right_col = util.clamp(left_col + 1, 1, 15)
-      local frac = util.clamp(position - left_col, 0, 1)
+      if value_col_max >= value_col_min then
+        local value = lane and lane.current_value or 0
+        -- Blend neighboring columns for smoother perceived motion as values change.
+        local span = math.max(1, value_col_max - value_col_min)
+        local position = ((value / 127) * span) + value_col_min
+        local left_col = util.clamp(math.floor(position), value_col_min, value_col_max)
+        local right_col = util.clamp(left_col + 1, value_col_min, value_col_max)
+        local frac = util.clamp(position - left_col, 0, 1)
 
-      if right_col == left_col then
-        grid_device:led(left_col, row, select_level)
-      else
-        -- Sharper than linear crossfade: nearest column stays dominant longer.
-        local sharpness = 2.2
-        local left_weight = math.pow(1 - frac, sharpness)
-        local right_weight = math.pow(frac, sharpness)
-        local weight_total = left_weight + right_weight
-        local left_level = 0
-        local right_level = 0
+        if right_col == left_col then
+          grid_device:led(left_col, row, select_level)
+        else
+          -- Sharper than linear crossfade: nearest column stays dominant longer.
+          local sharpness = 2.2
+          local left_weight = math.pow(1 - frac, sharpness)
+          local right_weight = math.pow(frac, sharpness)
+          local weight_total = left_weight + right_weight
+          local left_level = 0
+          local right_level = 0
 
-        if weight_total > 0 then
-          left_level = util.clamp(math.floor(((left_weight / weight_total) * select_level) + 0.5), 0, 15)
-          right_level = util.clamp(math.floor(((right_weight / weight_total) * select_level) + 0.5), 0, 15)
-        end
+          if weight_total > 0 then
+            left_level = util.clamp(math.floor(((left_weight / weight_total) * select_level) + 0.5), 0, 15)
+            right_level = util.clamp(math.floor(((right_weight / weight_total) * select_level) + 0.5), 0, 15)
+          end
 
-        if left_level > 0 then
-          grid_device:led(left_col, row, left_level)
-        end
-        if right_level > 0 then
-          grid_device:led(right_col, row, right_level)
+          if left_level > 0 then
+            grid_device:led(left_col, row, left_level)
+          end
+          if right_level > 0 then
+            grid_device:led(right_col, row, right_level)
+          end
         end
       end
     end
   end
 
-  local page_col = grid_device.cols or 16
-  if page_col > 16 then
-    page_col = 16
-  end
   for bank = 1, GRID_BANK_COUNT do
     grid_device:led(page_col, bank, bank == ui.grid_bank and 8 or 2)
   end
@@ -740,9 +813,12 @@ function init()
       if page_col > 16 then
         page_col = 16
       end
+      local value_col_min = GRID_VALUE_COL_MIN
+      local value_col_max = math.min(GRID_VALUE_COL_MAX, page_col - 1)
 
       if x == page_col then
         if z == 1 and y >= 1 and y <= GRID_BANK_COUNT then
+          clear_grid_hold()
           set_grid_bank(y)
           mark_dirty()
         end
@@ -756,6 +832,33 @@ function init()
           set_selected_lane(lane_index)
           ui.page = PAGE_GLOBAL
           mark_dirty()
+        end
+        if grid_hold.active and grid_hold.row == row then
+          clear_grid_hold()
+        end
+        return
+      end
+
+      if value_col_max >= value_col_min and x >= value_col_min and x <= value_col_max then
+        local row = (y >= 1 and y <= GRID_BANK_ROWS) and y or 1
+        local lane_index = ((ui.grid_bank - 1) * GRID_BANK_ROWS) + row
+        if lane_index > LANE_COUNT then
+          return
+        end
+
+        if z == 1 then
+          if not grid_hold.active then
+            start_grid_hold(lane_index, row, x, value_col_min, value_col_max)
+          elseif grid_hold.active and grid_hold.row == row and grid_hold.lane_index == lane_index and x ~= grid_hold.base_col then
+            if grid_hold.highest_col == nil or x > grid_hold.highest_col then
+              grid_hold.highest_col = x
+            end
+          end
+          return
+        end
+
+        if z == 0 and grid_hold.active and grid_hold.row == row and x == grid_hold.base_col then
+          maybe_commit_grid_hold()
         end
       end
     end
