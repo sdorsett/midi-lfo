@@ -9,7 +9,7 @@ local PAGE_LFO = 3
 local STATE_VERSION = 2
 
 local LANE_COUNT = 16
-local MIN_RATE_HZ = 0.01
+local MIN_RATE_HZ = 0.001
 local MAX_RATE_HZ = 20.0
 
 local SHAPES = {
@@ -256,12 +256,7 @@ local function save_state()
 end
 
 local function rate_step(rate)
-  if rate < 0.20 then
-    return 0.01
-  elseif rate < 1.0 then
-    return 0.05
-  end
-  return 0.10
+  return 0.001
 end
 
 local function adjust_global(delta)
@@ -503,7 +498,7 @@ local function draw_lfo_page()
   draw_field(14, "lane", string.format("%02d", ui.selected_lane), false)
   draw_field(24, "base", tostring(lane.base), ui.selection[PAGE_LFO] == 1)
   draw_field(34, "shape", short_name(shape), ui.selection[PAGE_LFO] == 2)
-  draw_field(44, "rate", string.format("%.2fHz", lane.rate), ui.selection[PAGE_LFO] == 3)
+  draw_field(44, "rate", string.format("%.3fHz", lane.rate), ui.selection[PAGE_LFO] == 3)
   draw_field(54, "depth", tostring(lane.depth), ui.selection[PAGE_LFO] == 4)
 end
 
