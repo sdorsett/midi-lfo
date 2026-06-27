@@ -70,7 +70,7 @@ local function default_lane()
     base = 64,
     shape_index = 1,
     rate = 0.5,
-    depth = 16,
+    depth = 0,
     phase = 0,
     sh_value = 0,
     last_sent_value = nil,
