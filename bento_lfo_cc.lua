@@ -41,6 +41,9 @@ local output_midi
 local redraw_timer
 local lfo_clock
 local lfo_running = false
+local midigrid_lib
+local midigrid_2pages_lib
+local using_midigrid = false
 
 local function mark_dirty()
   ui.dirty = true
@@ -63,6 +66,18 @@ local function short_name(name)
     return name
   end
   return util.acronym(name)
+end
+
+local function try_include(path)
+  local ok, lib = pcall(function()
+    return include(path)
+  end)
+
+  if ok then
+    return lib
+  end
+
+  return nil
 end
 
 local function default_lane()
@@ -119,8 +134,28 @@ local function native_grid_connected()
 end
 
 local function connect_grid_device()
+  using_midigrid = false
+
   if native_grid_connected() then
     return grid.connect()
+  end
+
+  if midigrid_2pages_lib == nil then
+    midigrid_2pages_lib = try_include("midigrid/lib/midigrid_2pages")
+  end
+
+  if midigrid_lib == nil then
+    midigrid_lib = try_include("midigrid/lib/mg_128")
+  end
+
+  if midigrid_2pages_lib ~= nil and midigrid_2pages_lib.connect ~= nil then
+    using_midigrid = true
+    return midigrid_2pages_lib.connect()
+  end
+
+  if midigrid_lib ~= nil and midigrid_lib.connect ~= nil then
+    using_midigrid = true
+    return midigrid_lib.connect()
   end
 
   return nil
