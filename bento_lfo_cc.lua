@@ -14,6 +14,8 @@ local GRID_BANK_ROWS = 8
 local GRID_VALUE_COL_MIN = 2
 local GRID_VALUE_COL_MAX = 15
 local GRID_HOLD_SECONDS = 3.0
+local MIDI_BASE_FOLLOW_HZ = 120
+local MIDI_BASE_FOLLOW_BLEND = 0.08
 local MIN_RATE_HZ = 0.001
 local MAX_RATE_HZ = 20.0
 
@@ -42,6 +44,7 @@ local ui = {
 local lanes = {}
 local output_midi
 local redraw_timer
+local base_follow_timer
 local lfo_clock
 local lfo_running = false
 local midigrid_lib
@@ -110,6 +113,8 @@ local function default_lane()
     last_sent_cc = nil,
     last_sent_channel = nil,
     current_value = 64,
+    base_float = 64,
+    midi_base_target = 64,
   }
 end
 
@@ -283,9 +288,57 @@ local function reset_lane_history(lane)
   lane.last_sent_channel = nil
 end
 
+local function sync_lane_base_follow(lane)
+  lane.base_float = util.clamp(lane.base or 64, 0, 127)
+  lane.midi_base_target = lane.base_float
+end
+
+local function update_lane_base_follow(lane)
+  local target = util.clamp(lane.midi_base_target or lane.base or 64, 0, 127)
+  local current = util.clamp(lane.base_float or lane.base or target, 0, 127)
+
+  if current == target then
+    return false
+  end
+
+  local next_base = current + ((target - current) * MIDI_BASE_FOLLOW_BLEND)
+  lane.base_float = util.clamp(next_base, 0, 127)
+  lane.base = util.clamp(math.floor(lane.base_float + 0.5), 0, 127)
+  return lane.base ~= util.clamp(math.floor(current + 0.5), 0, 127)
+end
+
+local function update_base_from_incoming_cc(channel, cc, value)
+  local updated = false
+
+  for i = 1, LANE_COUNT do
+    local lane = lanes[i]
+    if lane ~= nil then
+      ensure_lane_indices(lane)
+      local _, _, lane_cc = current_entry(lane)
+      if lane_cc ~= nil and lane.channel == channel and lane_cc == cc then
+        lane.midi_base_target = util.clamp(value, 0, 127)
+        updated = true
+      end
+    end
+  end
+
+  if updated then
+    mark_dirty()
+  end
+end
+
 local function set_output_device(device)
   ui.output_device = util.clamp(device or 1, 1, 16)
   output_midi = midi.connect(ui.output_device)
+
+  if output_midi ~= nil then
+    output_midi.event = function(data)
+      local msg = midi.to_msg(data)
+      if msg ~= nil and msg.type == "cc" and msg.ch ~= nil and msg.cc ~= nil and msg.val ~= nil then
+        update_base_from_incoming_cc(msg.ch, msg.cc, msg.val)
+      end
+    end
+  end
 end
 
 local function load_state()
@@ -315,6 +368,7 @@ local function load_state()
             end
             lane.phase = src.phase or lane.phase
             lane.sh_value = src.sh_value or lane.sh_value
+            sync_lane_base_follow(lane)
           end
         end
       end
@@ -403,6 +457,7 @@ local function maybe_commit_grid_hold()
   local lane = lanes[grid_hold.lane_index]
   if lane ~= nil and grid_hold.base_value ~= nil then
     lane.base = util.clamp(grid_hold.base_value, 0, 127)
+    sync_lane_base_follow(lane)
     if grid_hold.highest_col ~= nil then
       local highest_value = grid_col_to_value(grid_hold.highest_col, grid_hold.value_col_min, grid_hold.value_col_max)
       lane.depth = util.clamp(math.abs(highest_value - lane.base), 0, 127)
@@ -534,6 +589,7 @@ local function adjust_lfo(delta)
 
   if field == 1 then
     lane.base = util.clamp(lane.base + delta, 0, 127)
+    sync_lane_base_follow(lane)
   elseif field == 2 then
     lane.shape_index = util.clamp(lane.shape_index + delta, 1, #SHAPES)
   elseif field == 3 then
@@ -637,11 +693,42 @@ local function run_lfos()
   end)
 end
 
+local function start_base_follow_timer()
+  base_follow_timer = metro.init()
+  base_follow_timer.time = 1 / MIDI_BASE_FOLLOW_HZ
+  base_follow_timer.count = -1
+  base_follow_timer.event = function()
+    local moved = false
+
+    for i = 1, LANE_COUNT do
+      local lane = lanes[i]
+      if lane ~= nil then
+        ensure_lane_indices(lane)
+        if update_lane_base_follow(lane) then
+          moved = true
+        end
+      end
+    end
+
+    if moved then
+      mark_dirty()
+    end
+  end
+  base_follow_timer:start()
+end
+
 local function stop_lfos()
   lfo_running = false
   if lfo_clock ~= nil then
     clock.cancel(lfo_clock)
     lfo_clock = nil
+  end
+end
+
+local function stop_base_follow_timer()
+  if base_follow_timer ~= nil then
+    base_follow_timer:stop()
+    base_follow_timer = nil
   end
 end
 
@@ -865,6 +952,7 @@ function init()
   end
 
   start_redraw_timer()
+  start_base_follow_timer()
   run_lfos()
   mark_dirty()
 end
@@ -872,6 +960,7 @@ end
 function cleanup()
   save_state()
   stop_lfos()
+  stop_base_follow_timer()
   stop_redraw_timer()
   if grid_device ~= nil then
     grid_device:all(0)
