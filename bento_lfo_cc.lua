@@ -283,8 +283,51 @@ local function reset_lane_history(lane)
   lane.last_sent_channel = nil
 end
 
+local function clear_lane_base_transition(lane)
+  lane.base_transition = nil
+end
+
+local function update_lane_base_transition(lane, now)
+  local transition = lane.base_transition
+  if transition == nil then
+    return false
+  end
+
+  local elapsed = now - transition.started_at
+  if elapsed <= 0 then
+    lane.base = util.clamp(transition.start_base, 0, 127)
+    return true
+  end
+
+  local progress = util.clamp(elapsed / transition.duration, 0, 1)
+  local next_base = transition.start_base + ((transition.target_base - transition.start_base) * progress)
+  lane.base = util.clamp(next_base, 0, 127)
+
+  if progress >= 1 then
+    lane.base_transition = nil
+  end
+
+  return true
+end
+
+local function start_lane_base_transition(lane, target_base, now)
+  local current_base = lane.base
+  if lane.base_transition ~= nil then
+    update_lane_base_transition(lane, now)
+    current_base = lane.base
+  end
+
+  lane.base_transition = {
+    start_base = util.clamp(current_base, 0, 127),
+    target_base = util.clamp(target_base, 0, 127),
+    started_at = now,
+    duration = 5.0,
+  }
+end
+
 local function update_base_from_incoming_cc(channel, cc, value)
   local updated = false
+  local now = util.time()
 
   for i = 1, LANE_COUNT do
     local lane = lanes[i]
@@ -292,7 +335,7 @@ local function update_base_from_incoming_cc(channel, cc, value)
       ensure_lane_indices(lane)
       local _, _, lane_cc = current_entry(lane)
       if lane_cc ~= nil and lane.channel == channel and lane_cc == cc then
-        lane.base = util.clamp(value, 0, 127)
+        start_lane_base_transition(lane, value, now)
         updated = true
       end
     end
@@ -431,6 +474,7 @@ local function maybe_commit_grid_hold()
 
   local lane = lanes[grid_hold.lane_index]
   if lane ~= nil and grid_hold.base_value ~= nil then
+    clear_lane_base_transition(lane)
     lane.base = util.clamp(grid_hold.base_value, 0, 127)
     if grid_hold.highest_col ~= nil then
       local highest_value = grid_col_to_value(grid_hold.highest_col, grid_hold.value_col_min, grid_hold.value_col_max)
@@ -562,6 +606,7 @@ local function adjust_lfo(delta)
   local field = ui.selection[PAGE_LFO]
 
   if field == 1 then
+    clear_lane_base_transition(lane)
     lane.base = util.clamp(lane.base + delta, 0, 127)
   elseif field == 2 then
     lane.shape_index = util.clamp(lane.shape_index + delta, 1, #SHAPES)
@@ -656,6 +701,7 @@ local function run_lfos()
       for i = 1, LANE_COUNT do
         local lane = lanes[i]
         ensure_lane_indices(lane)
+        update_lane_base_transition(lane, now)
         advance_phase(lane, dt)
         send_lane_value(lane)
       end
