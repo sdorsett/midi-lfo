@@ -283,9 +283,38 @@ local function reset_lane_history(lane)
   lane.last_sent_channel = nil
 end
 
+local function update_base_from_incoming_cc(channel, cc, value)
+  local updated = false
+
+  for i = 1, LANE_COUNT do
+    local lane = lanes[i]
+    if lane ~= nil then
+      ensure_lane_indices(lane)
+      local _, _, lane_cc = current_entry(lane)
+      if lane_cc ~= nil and lane.channel == channel and lane_cc == cc then
+        lane.base = util.clamp(value, 0, 127)
+        updated = true
+      end
+    end
+  end
+
+  if updated then
+    mark_dirty()
+  end
+end
+
 local function set_output_device(device)
   ui.output_device = util.clamp(device or 1, 1, 16)
   output_midi = midi.connect(ui.output_device)
+
+  if output_midi ~= nil then
+    output_midi.event = function(data)
+      local msg = midi.to_msg(data)
+      if msg ~= nil and msg.type == "cc" and msg.ch ~= nil and msg.cc ~= nil and msg.val ~= nil then
+        update_base_from_incoming_cc(msg.ch, msg.cc, msg.val)
+      end
+    end
+  end
 end
 
 local function load_state()
