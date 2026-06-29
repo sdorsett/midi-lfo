@@ -14,9 +14,6 @@ local GRID_BANK_ROWS = 8
 local GRID_VALUE_COL_MIN = 2
 local GRID_VALUE_COL_MAX = 15
 local GRID_HOLD_SECONDS = 3.0
-local BASE_FOLLOW_SECONDS = 5.0
-local BASE_FOLLOW_DEADBAND = 1
-local BASE_FOLLOW_HZ = 120
 local MIN_RATE_HZ = 0.001
 local MAX_RATE_HZ = 20.0
 
@@ -45,7 +42,6 @@ local ui = {
 local lanes = {}
 local output_midi
 local redraw_timer
-local base_follow_timer
 local lfo_clock
 local lfo_running = false
 local midigrid_lib
@@ -114,7 +110,6 @@ local function default_lane()
     last_sent_cc = nil,
     last_sent_channel = nil,
     current_value = 64,
-    base_target = 64,
   }
 end
 
@@ -288,69 +283,8 @@ local function reset_lane_history(lane)
   lane.last_sent_channel = nil
 end
 
-local function clear_lane_base_transition(lane)
-  lane.base_transition = nil
-end
-
-local function update_lane_base_transition(lane, now)
-  local transition = lane.base_transition
-  local target = lane.base_target
-  if transition == nil or target == nil then
-    return false
-  end
-
-  local last_update = transition.last_update or now
-  local elapsed = now - last_update
-  if elapsed <= 0 then
-    return true
-  end
-
-  transition.last_update = now
-
-  local current_base = util.clamp(lane.base or target, 0, 127)
-  local max_step = (127 / BASE_FOLLOW_SECONDS) * elapsed
-  local diff = target - current_base
-  local next_base = current_base
-
-  if math.abs(diff) <= max_step then
-    next_base = target
-  elseif diff > 0 then
-    next_base = current_base + max_step
-  else
-    next_base = current_base - max_step
-  end
-
-  lane.base = util.clamp(next_base, 0, 127)
-
-  if lane.base == target then
-    lane.base_transition = nil
-  end
-
-  return lane.base ~= current_base
-end
-
-local function start_lane_base_transition(lane, target_base, now)
-  local clamped_target = util.clamp(target_base, 0, 127)
-  local current_target = lane.base_target
-  if current_target ~= nil and math.abs(current_target - clamped_target) <= BASE_FOLLOW_DEADBAND then
-    return false
-  end
-
-  lane.base_target = clamped_target
-  if lane.base_transition == nil then
-    lane.base_transition = {
-      last_update = now,
-    }
-  else
-    lane.base_transition.last_update = now
-  end
-
-  return true
-end
-
 local function update_base_from_incoming_cc(channel, cc, value)
   local updated = false
-  local now = util.time()
 
   for i = 1, LANE_COUNT do
     local lane = lanes[i]
@@ -358,7 +292,7 @@ local function update_base_from_incoming_cc(channel, cc, value)
       ensure_lane_indices(lane)
       local _, _, lane_cc = current_entry(lane)
       if lane_cc ~= nil and lane.channel == channel and lane_cc == cc then
-        start_lane_base_transition(lane, value, now)
+        lane.base = util.clamp(value, 0, 127)
         updated = true
       end
     end
@@ -410,7 +344,6 @@ local function load_state()
             end
             lane.phase = src.phase or lane.phase
             lane.sh_value = src.sh_value or lane.sh_value
-            lane.base_target = lane.base
           end
         end
       end
@@ -498,9 +431,7 @@ local function maybe_commit_grid_hold()
 
   local lane = lanes[grid_hold.lane_index]
   if lane ~= nil and grid_hold.base_value ~= nil then
-    clear_lane_base_transition(lane)
     lane.base = util.clamp(grid_hold.base_value, 0, 127)
-    lane.base_target = lane.base
     if grid_hold.highest_col ~= nil then
       local highest_value = grid_col_to_value(grid_hold.highest_col, grid_hold.value_col_min, grid_hold.value_col_max)
       lane.depth = util.clamp(math.abs(highest_value - lane.base), 0, 127)
@@ -631,9 +562,7 @@ local function adjust_lfo(delta)
   local field = ui.selection[PAGE_LFO]
 
   if field == 1 then
-    clear_lane_base_transition(lane)
     lane.base = util.clamp(lane.base + delta, 0, 127)
-    lane.base_target = lane.base
   elseif field == 2 then
     lane.shape_index = util.clamp(lane.shape_index + delta, 1, #SHAPES)
   elseif field == 3 then
@@ -732,34 +661,9 @@ local function run_lfos()
       end
 
       mark_dirty()
-      clock.sleep(1 / 60)
+      clock.sleep(1 / 30)
     end
   end)
-end
-
-local function start_base_follow_timer()
-  base_follow_timer = metro.init()
-  base_follow_timer.time = 1 / BASE_FOLLOW_HZ
-  base_follow_timer.count = -1
-  base_follow_timer.event = function()
-    local now = util.time()
-    local moved = false
-
-    for i = 1, LANE_COUNT do
-      local lane = lanes[i]
-      if lane ~= nil then
-        ensure_lane_indices(lane)
-        if update_lane_base_transition(lane, now) then
-          moved = true
-        end
-      end
-    end
-
-    if moved then
-      mark_dirty()
-    end
-  end
-  base_follow_timer:start()
 end
 
 local function stop_lfos()
@@ -767,13 +671,6 @@ local function stop_lfos()
   if lfo_clock ~= nil then
     clock.cancel(lfo_clock)
     lfo_clock = nil
-  end
-end
-
-local function stop_base_follow_timer()
-  if base_follow_timer ~= nil then
-    base_follow_timer:stop()
-    base_follow_timer = nil
   end
 end
 
@@ -997,7 +894,6 @@ function init()
   end
 
   start_redraw_timer()
-  start_base_follow_timer()
   run_lfos()
   mark_dirty()
 end
@@ -1005,7 +901,6 @@ end
 function cleanup()
   save_state()
   stop_lfos()
-  stop_base_follow_timer()
   stop_redraw_timer()
   if grid_device ~= nil then
     grid_device:all(0)
