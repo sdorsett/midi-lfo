@@ -300,7 +300,8 @@ local function update_lane_base_transition(lane, now)
   end
 
   local progress = util.clamp(elapsed / transition.duration, 0, 1)
-  local next_base = transition.start_base + ((transition.target_base - transition.start_base) * progress)
+  local eased_progress = progress * progress * (3 - (2 * progress))
+  local next_base = transition.start_base + ((transition.target_base - transition.start_base) * eased_progress)
   lane.base = util.clamp(next_base, 0, 127)
 
   if progress >= 1 then
@@ -707,7 +708,7 @@ local function run_lfos()
       end
 
       mark_dirty()
-      clock.sleep(1 / 30)
+      clock.sleep(1 / 60)
     end
   end)
 end
