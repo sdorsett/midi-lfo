@@ -14,6 +14,8 @@ local GRID_BANK_ROWS = 8
 local GRID_VALUE_COL_MIN = 2
 local GRID_VALUE_COL_MAX = 15
 local GRID_HOLD_SECONDS = 3.0
+local MIDI_BASE_FOLLOW_DEADBAND = 1
+local MIDI_BASE_FOLLOW_BLEND = 0.25
 local MIN_RATE_HZ = 0.001
 local MAX_RATE_HZ = 20.0
 
@@ -292,8 +294,14 @@ local function update_base_from_incoming_cc(channel, cc, value)
       ensure_lane_indices(lane)
       local _, _, lane_cc = current_entry(lane)
       if lane_cc ~= nil and lane.channel == channel and lane_cc == cc then
-        lane.base = util.clamp(value, 0, 127)
-        updated = true
+        local target = util.clamp(value, 0, 127)
+        local current = util.clamp(lane.base, 0, 127)
+
+        if math.abs(target - current) > MIDI_BASE_FOLLOW_DEADBAND then
+          local next_base = current + ((target - current) * MIDI_BASE_FOLLOW_BLEND)
+          lane.base = util.clamp(math.floor(next_base + 0.5), 0, 127)
+          updated = true
+        end
       end
     end
   end
