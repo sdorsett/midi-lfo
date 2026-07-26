@@ -2,11 +2,11 @@
 
 MIDI CC LFO utility for norns.
 
-This script provides 16 always-running LFO lanes that send MIDI CC values to a shared MIDI output device.
+This script provides 32 always-running LFO lanes that send MIDI CC values to a shared MIDI output device.
 
 ## Features
 
-- 16 independent LFO lanes
+- 32 independent LFO lanes
 - Per-lane routing:
   - MIDI channel
   - instrument type
@@ -15,7 +15,7 @@ This script provides 16 always-running LFO lanes that send MIDI CC values to a s
 - Per-lane LFO settings:
   - base CC value (0-127)
   - shape: sin, saw, reverse_saw, triangle, sample_hold
-  - rate in Hz (0.01 to 20.00)
+  - rate in Hz (0.001 to 20.00)
   - depth (0-127)
 - No toggle required; all LFO lanes run continuously
 - State persistence across sessions
