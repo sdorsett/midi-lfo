@@ -14,6 +14,8 @@ local GRID_BANK_ROWS = 8
 local GRID_VALUE_COL_MIN = 2
 local GRID_VALUE_COL_MAX = 15
 local GRID_HOLD_SECONDS = 3.0
+local GRID_CC_LEARN_HOLD_SECONDS = 1.0
+local GRID_CC_LEARN_TIMEOUT_SECONDS = 10.0
 local MIDI_BASE_FOLLOW_HZ = 120
 local MIDI_BASE_FOLLOW_BLEND = 0.08
 local MIN_RATE_HZ = 0.001
@@ -61,6 +63,17 @@ local grid_hold = {
   highest_col = nil,
   value_col_min = GRID_VALUE_COL_MIN,
   value_col_max = GRID_VALUE_COL_MAX,
+}
+local cc_learn = {
+  active = false,
+  lane_index = nil,
+  started_at = 0,
+}
+local grid_lane_press = {
+  active = false,
+  lane_index = nil,
+  row = nil,
+  started_at = 0,
 }
 
 local function mark_dirty()
@@ -116,6 +129,8 @@ local function default_lane()
     current_value = 64,
     base_float = 64,
     midi_base_target = 64,
+    use_learned_cc = false,
+    learned_cc = nil,
   }
 end
 
@@ -137,6 +152,43 @@ end
 
 local function set_grid_bank(bank)
   ui.grid_bank = clamp_grid_bank(bank)
+end
+
+local function clear_lane_press()
+  grid_lane_press.active = false
+  grid_lane_press.lane_index = nil
+  grid_lane_press.row = nil
+  grid_lane_press.started_at = 0
+end
+
+local function start_lane_press(lane_index, row)
+  grid_lane_press.active = true
+  grid_lane_press.lane_index = lane_index
+  grid_lane_press.row = row
+  grid_lane_press.started_at = util.time()
+end
+
+local function cancel_cc_learn(should_mark_dirty)
+  cc_learn.active = false
+  cc_learn.lane_index = nil
+  cc_learn.started_at = 0
+  if should_mark_dirty ~= false then
+    mark_dirty()
+  end
+end
+
+local function start_cc_learn(lane_index)
+  cc_learn.active = true
+  cc_learn.lane_index = lane_index
+  cc_learn.started_at = util.time()
+  mark_dirty()
+end
+
+local function cc_learn_timed_out()
+  if not cc_learn.active then
+    return false
+  end
+  return (util.time() - (cc_learn.started_at or 0)) >= GRID_CC_LEARN_TIMEOUT_SECONDS
 end
 
 local function cancel_clear_all_arm()
@@ -256,6 +308,14 @@ local function current_entry(lane)
   return inst_name, context, entry.midi_cc, parameter
 end
 
+local function lane_effective_cc(lane)
+  if lane ~= nil and lane.use_learned_cc and lane.learned_cc ~= nil then
+    return util.clamp(lane.learned_cc, 0, 127)
+  end
+  local _, _, mapped_cc = current_entry(lane)
+  return mapped_cc
+end
+
 local function ensure_lane_indices(lane)
   local inst_count = available_instrument_count()
   if inst_count < 1 then
@@ -298,7 +358,30 @@ local function sync_lane_base_follow(lane)
   lane.midi_base_target = lane.base_float
 end
 
+local function maybe_capture_cc_learn(channel, cc, value)
+  if not cc_learn.active or cc_learn.lane_index == nil then
+    return false
+  end
+
+  local lane = lanes[cc_learn.lane_index]
+  if lane == nil then
+    cancel_cc_learn(false)
+    return true
+  end
+
+  lane.channel = util.clamp(channel, 1, 16)
+  lane.learned_cc = util.clamp(cc, 0, 127)
+  lane.use_learned_cc = true
+  lane.midi_base_target = util.clamp(value, 0, 127)
+  reset_lane_history(lane)
+  cancel_cc_learn(false)
+  mark_dirty()
+  return true
+end
+
 local function clear_all_lanes()
+  cancel_cc_learn(false)
+  clear_lane_press()
   for i = 1, LANE_COUNT do
     lanes[i] = default_lane()
     lanes[i].sh_value = (math.random() * 2) - 1
@@ -331,7 +414,7 @@ local function update_base_from_incoming_cc(channel, cc, value)
     local lane = lanes[i]
     if lane ~= nil then
       ensure_lane_indices(lane)
-      local _, _, lane_cc = current_entry(lane)
+      local lane_cc = lane_effective_cc(lane)
       if lane_cc ~= nil and lane.channel == channel and lane_cc == cc then
         lane.midi_base_target = util.clamp(value, 0, 127)
         updated = true
@@ -352,6 +435,9 @@ local function set_output_device(device)
     output_midi.event = function(data)
       local msg = midi.to_msg(data)
       if msg ~= nil and msg.type == "cc" and msg.ch ~= nil and msg.cc ~= nil and msg.val ~= nil then
+        if maybe_capture_cc_learn(msg.ch, msg.cc, msg.val) then
+          return
+        end
         update_base_from_incoming_cc(msg.ch, msg.cc, msg.val)
       end
     end
@@ -378,6 +464,8 @@ local function load_state()
             lane.base = util.clamp(src.base or lane.base, 0, 127)
             lane.shape_index = util.clamp(src.shape_index or lane.shape_index, 1, #SHAPES)
             lane.rate = util.clamp(src.rate or lane.rate, MIN_RATE_HZ, MAX_RATE_HZ)
+            lane.learned_cc = src.learned_cc and util.clamp(src.learned_cc, 0, 127) or nil
+            lane.use_learned_cc = (src.use_learned_cc == true) and (lane.learned_cc ~= nil)
             if needs_depth_reset then
               lane.depth = 0
             else
@@ -407,6 +495,8 @@ local function save_state()
       base = lane.base,
       shape_index = lane.shape_index,
       rate = lane.rate,
+      use_learned_cc = lane.use_learned_cc,
+      learned_cc = lane.learned_cc,
       depth = lane.depth,
       phase = lane.phase,
       sh_value = lane.sh_value,
@@ -506,6 +596,10 @@ local function redraw_grid()
     if lane_index <= page_stop then
       local lane = lanes[lane_index]
       local select_level = grid_lane_level(lane_index)
+      if cc_learn.active and cc_learn.lane_index == lane_index then
+        local blink_phase = math.floor(util.time() * 4) % 2
+        select_level = blink_phase == 0 and 15 or 2
+      end
       grid_device:led(1, row, select_level)
 
       if value_col_max >= value_col_min then
@@ -595,6 +689,11 @@ local function adjust_route(delta)
       lane.parameter_index = util.clamp(lane.parameter_index + delta, 1, #params)
       reset_lane_history(lane)
     end
+  elseif field == 5 then
+    if lane.learned_cc ~= nil then
+      lane.use_learned_cc = not lane.use_learned_cc
+      reset_lane_history(lane)
+    end
   end
 
   ensure_lane_indices(lane)
@@ -664,7 +763,7 @@ local function send_lane_value(lane)
     return
   end
 
-  local _, _, cc = current_entry(lane)
+  local cc = lane_effective_cc(lane)
   if cc == nil then
     return
   end
@@ -758,6 +857,9 @@ local function start_redraw_timer()
   redraw_timer.time = 1 / 15
   redraw_timer.count = -1
   redraw_timer.event = function()
+    if cc_learn_timed_out() then
+      cancel_cc_learn()
+    end
     if ui.dirty then
       redraw()
     end
@@ -793,11 +895,19 @@ local function lane_context_text(lane)
 end
 
 local function lane_parameter_text(lane)
-  local _, _, cc, parameter = current_entry(lane)
+  local _, _, mapped_cc, parameter = current_entry(lane)
+  local cc = lane_effective_cc(lane)
   if cc == nil then
     return "none"
   end
+
   local left = string.format("cc%03d", cc)
+  if lane.use_learned_cc and lane.learned_cc ~= nil then
+    return left .. " learned"
+  end
+  if mapped_cc == nil then
+    return left
+  end
   return left .. " " .. short_name(parameter)
 end
 
@@ -814,11 +924,19 @@ end
 local function draw_route_page()
   local lane = lanes[ui.selected_lane]
   local inst_name = instrument_name(lane.instrument_index) or "none"
-  draw_field(14, "lane", string.format("%02d", ui.selected_lane), false)
-  draw_field(24, "ch", tostring(lane.channel), ui.selection[PAGE_ROUTE] == 1)
-  draw_field(34, "inst", short_name(inst_name), ui.selection[PAGE_ROUTE] == 2)
-  draw_field(44, "ctx", lane_context_text(lane), ui.selection[PAGE_ROUTE] == 3)
-  draw_field(54, "param", lane_parameter_text(lane), ui.selection[PAGE_ROUTE] == 4)
+  local source_text = "mapped"
+  if lane.learned_cc ~= nil then
+    if lane.use_learned_cc then
+      source_text = string.format("learn %03d", lane.learned_cc)
+    else
+      source_text = "mapped*"
+    end
+  end
+  draw_field(14, "ch", tostring(lane.channel), ui.selection[PAGE_ROUTE] == 1)
+  draw_field(24, "inst", short_name(inst_name), ui.selection[PAGE_ROUTE] == 2)
+  draw_field(34, "ctx", lane_context_text(lane), ui.selection[PAGE_ROUTE] == 3)
+  draw_field(44, "param", lane_parameter_text(lane), ui.selection[PAGE_ROUTE] == 4)
+  draw_field(54, "src", source_text, ui.selection[PAGE_ROUTE] == 5)
 end
 
 local function draw_lfo_page()
@@ -835,7 +953,11 @@ function redraw()
   screen.clear()
   screen.level(10)
   screen.move(1, 8)
-  screen.text(string.format("bento lfo %d/3", ui.page))
+  if cc_learn.active and cc_learn.lane_index ~= nil then
+    screen.text(string.format("learn l%02d: send cc", cc_learn.lane_index))
+  else
+    screen.text(string.format("bento lfo %d/3", ui.page))
+  end
 
   if ui.page == PAGE_GLOBAL then
     draw_global_page()
@@ -861,7 +983,7 @@ function enc(n, d)
   if n == 2 then
     local max_by_page = {
       [PAGE_GLOBAL] = 3,
-      [PAGE_ROUTE] = 4,
+      [PAGE_ROUTE] = 5,
       [PAGE_LFO] = 4,
     }
     cancel_clear_all_arm()
@@ -886,6 +1008,11 @@ end
 
 function key(n, z)
   if z == 0 then
+    return
+  end
+
+  if cc_learn.active and n == 2 then
+    cancel_cc_learn()
     return
   end
 
@@ -942,6 +1069,7 @@ function init()
 
       if x == page_col then
         if z == 1 and y >= 1 and y <= GRID_BANK_COUNT then
+          cancel_cc_learn()
           clear_grid_hold()
           set_grid_bank(y)
           mark_dirty()
@@ -949,16 +1077,34 @@ function init()
         return
       end
 
-      if x == 1 and z == 1 then
+      if x == 1 then
         local row = (y >= 1 and y <= GRID_BANK_ROWS) and y or 1
         local lane_index = ((ui.grid_bank - 1) * GRID_BANK_ROWS) + row
-        if lane_index <= LANE_COUNT then
-          set_selected_lane(lane_index)
-          ui.page = PAGE_GLOBAL
-          mark_dirty()
+        if lane_index > LANE_COUNT then
+          clear_lane_press()
+          return
         end
-        if grid_hold.active and grid_hold.row == row then
-          clear_grid_hold()
+
+        if z == 1 then
+          start_lane_press(lane_index, row)
+          if grid_hold.active and grid_hold.row == row then
+            clear_grid_hold()
+          end
+          return
+        end
+
+        if z == 0 and grid_lane_press.active and grid_lane_press.row == row and grid_lane_press.lane_index == lane_index then
+          local held_for = util.time() - (grid_lane_press.started_at or 0)
+          clear_lane_press()
+          set_selected_lane(lane_index)
+
+          if held_for >= GRID_CC_LEARN_HOLD_SECONDS then
+            ui.page = PAGE_ROUTE
+            start_cc_learn(lane_index)
+          else
+            ui.page = PAGE_GLOBAL
+            mark_dirty()
+          end
         end
         return
       end
