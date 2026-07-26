@@ -2,11 +2,11 @@
 
 MIDI CC LFO utility for norns.
 
-This script provides 16 always-running LFO lanes that send MIDI CC values to a shared MIDI output device.
+This script provides 32 always-running LFO lanes that send MIDI CC values to a shared MIDI output device.
 
 ## Features
 
-- 16 independent LFO lanes
+- 32 independent LFO lanes
 - Per-lane routing:
   - MIDI channel
   - instrument type
@@ -15,8 +15,12 @@ This script provides 16 always-running LFO lanes that send MIDI CC values to a s
 - Per-lane LFO settings:
   - base CC value (0-127)
   - shape: sin, saw, reverse_saw, triangle, sample_hold
-  - rate in Hz (0.01 to 20.00)
+  - rate in Hz (0.001 to 20.00)
   - depth (0-127)
+- MIDI input base-follow:
+  - incoming CC on the selected MIDI device can update lane base values
+  - matching is per-lane route (same MIDI channel and mapped CC)
+  - base follows smoothly toward incoming values
 - No toggle required; all LFO lanes run continuously
 - State persistence across sessions
 
@@ -68,3 +72,7 @@ This script provides 16 always-running LFO lanes that send MIDI CC values to a s
 - LFO phase is continuous during edits.
 - Sample and hold updates on cycle wrap.
 - All lanes share the selected output MIDI device.
+- MIDI base-follow only affects lanes that match incoming CC channel + CC number.
+- If multiple lanes share the same channel + CC mapping, all matching lanes follow.
+- Manual base edits (encoder or grid hold) apply immediately and continue following from there.
+- Base-follow shifts the LFO center while depth, shape, and rate continue to apply normally.
