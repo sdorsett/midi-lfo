@@ -38,6 +38,7 @@ local ui = {
   selected_lane = 1,
   grid_bank = 1,
   output_device = 1,
+  clear_all_armed = false,
   dirty = true,
 }
 
@@ -136,6 +137,10 @@ end
 
 local function set_grid_bank(bank)
   ui.grid_bank = clamp_grid_bank(bank)
+end
+
+local function cancel_clear_all_arm()
+  ui.clear_all_armed = false
 end
 
 local function native_grid_connected()
@@ -291,6 +296,18 @@ end
 local function sync_lane_base_follow(lane)
   lane.base_float = util.clamp(lane.base or 64, 0, 127)
   lane.midi_base_target = lane.base_float
+end
+
+local function clear_all_lanes()
+  for i = 1, LANE_COUNT do
+    lanes[i] = default_lane()
+    lanes[i].sh_value = (math.random() * 2) - 1
+    ensure_lane_indices(lanes[i])
+    reset_lane_history(lanes[i])
+    sync_lane_base_follow(lanes[i])
+  end
+  cancel_clear_all_arm()
+  mark_dirty()
 end
 
 local function update_lane_base_follow(lane)
@@ -540,9 +557,13 @@ local function adjust_global(delta)
   end
 
   if ui.selection[PAGE_GLOBAL] == 1 then
+    cancel_clear_all_arm()
     set_output_device(ui.output_device + delta)
   elseif ui.selection[PAGE_GLOBAL] == 2 then
+    cancel_clear_all_arm()
     set_selected_lane(ui.selected_lane + delta)
+  elseif ui.selection[PAGE_GLOBAL] == 3 then
+    ui.clear_all_armed = true
   end
 end
 
@@ -782,11 +803,12 @@ end
 
 local function draw_global_page()
   local lane = lanes[ui.selected_lane]
+  local clear_text = ui.clear_all_armed and "k3 confirm" or "turn e3"
   draw_field(14, "out", string.format("%d %s", ui.output_device, short_name(midi.vports[ui.output_device] and midi.vports[ui.output_device].name)), ui.selection[PAGE_GLOBAL] == 1)
   draw_field(24, "lane", string.format("%02d/%02d", ui.selected_lane, LANE_COUNT), ui.selection[PAGE_GLOBAL] == 2)
-  draw_field(36, "ctx", lane_context_text(lane), false)
-  draw_field(46, "param", lane_parameter_text(lane), false)
-  draw_field(56, "value", tostring(lane.current_value or lane.base), false)
+  draw_field(34, "clear", clear_text, ui.selection[PAGE_GLOBAL] == 3)
+  draw_field(46, "ctx", lane_context_text(lane), false)
+  draw_field(56, "param", lane_parameter_text(lane), false)
 end
 
 local function draw_route_page()
@@ -830,6 +852,7 @@ end
 
 function enc(n, d)
   if n == 1 then
+    cancel_clear_all_arm()
     ui.page = util.clamp(ui.page + encoder_delta(d), 1, ui.page_count)
     mark_dirty()
     return
@@ -837,10 +860,11 @@ function enc(n, d)
 
   if n == 2 then
     local max_by_page = {
-      [PAGE_GLOBAL] = 2,
+      [PAGE_GLOBAL] = 3,
       [PAGE_ROUTE] = 4,
       [PAGE_LFO] = 4,
     }
+    cancel_clear_all_arm()
     local max_fields = max_by_page[ui.page] or 1
     ui.selection[ui.page] = util.clamp(ui.selection[ui.page] + encoder_delta(d), 1, max_fields)
     mark_dirty()
@@ -865,10 +889,23 @@ function key(n, z)
     return
   end
 
+  if ui.page == PAGE_GLOBAL and ui.selection[PAGE_GLOBAL] == 3 and ui.clear_all_armed then
+    if n == 2 then
+      cancel_clear_all_arm()
+      mark_dirty()
+      return
+    elseif n == 3 then
+      clear_all_lanes()
+      return
+    end
+  end
+
   if n == 2 then
+    cancel_clear_all_arm()
     set_selected_lane(ui.selected_lane - 1)
     mark_dirty()
   elseif n == 3 then
+    cancel_clear_all_arm()
     set_selected_lane(ui.selected_lane + 1)
     mark_dirty()
   end
